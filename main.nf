@@ -1,68 +1,39 @@
 #!/usr/bin/env nextflow
 
-/*
- Minimal Nextflow conversion of Oshlack/JAFFA CWL workflow:
-  - unpack reference tar
-  - run JAFFA via bpipe
-  - convert results to bedpe
-*/
-
-//cwl/jaffa.cwl (CWL CommandLineTool that runs bpipe)
-// cwl/smcFusion-jaffa-workflow.cwl (CWL Workflow wiring tar → jaffa → converter)
-// cwl/tar.cwl (untar step)
-// cwl/converter.cwl (convert JAFFA CSV → BEDPE)
-// cwl/twoBitToFa.cwl (helper)
-// JAFFA_direct.groovy, JAFFA_stages.groovy, JAFFA_assembly.groovy, JAFFA_hybrid.groovy, JAFFAL.groovy (the bpipe pipeline scripts)
-// install_linux64.sh / Dockerfile (how the image is built; container ENTRYPOINT is bpipe run)
-
-params.reference_tar = null      // path to jaffa_reference tar.gz (or a folder if you already unpacked)
-params.reference_dir = '/wgbs/scratch/syin/LRS74/BT474-demo/'    // dir inside container with reference files (map host -> container)
-params.pipeline = '/wgbs/scratch/syin/LRS74/JAFFA/JAFFA_direct.groovy' // set to the pipeline inside the container
-params.genomeFasta = null
-params.fastq =  '/wgbs/scratch/syin/LRS74/BT474-demo/'
-params.fastqInputFormat = '%_*.fq.gz'
-params.genome = 'GRCh37'
-params.annotation = '75'
-params.threads = 2
-
-include { process_run_jaffa } from './modules/process_run_jaffa.nf'
-include { process_convert_bedpe } from './modules/process_convert_bedpe.nf'
+include { filter_transcripts } from './modules/filter_transcripts.nf'
+include { get_fasta } from './modules/get_fasta.nf'
+include { get_final_list } from './modules/get_final_list.nf'
+include { minimap2_transcriptome } from './modules/minimap2_transcriptome.nf'
+include { extract_fusion_sequences } from './modules/extract_fusion_sequences.nf'
+include { make_fasta_reads_table } from './modules/make_fasta_reads_table.nf'
+include { minimap2_genome } from './modules/minimap2_genome.nf'
+include { report_3_gene_fusions } from './modules/report_3_gene_fusions.nf'
 
 workflow {
-    // If you already have a reference directory, you can skip the tar step and set ref_ch accordingly.
-    ref_ch = Channel.fromPath(params.reference_dir)
-    // Channel.fromPath(params.reference_tar)
-    //     .ifEmpty {  }
 
-    // Step 1: unpack reference tar (if a tar is provided)
-    // unpacked_ref = ref_ch
-    //     .map { file -> file }
-    //     .set { ref_input }
+    jaffa_in_ch = Channel.fromPath("${params.fastq}/*.fastq.gz")
+                        .map { f -> tuple(f.simpleName, f) }
+    fasta_ch = get_fasta(jaffa_in_ch)
+    paf_ch = minimap2_transcriptome(fasta_ch)
+    txt_ch = filter_transcripts(paf_ch)
 
-    // If reference is a tar, run tar process; if it's a directory path, pass through
-    // ref_dir_ch = Channel.create()
-    // ref_input.subscribe { f ->
-    //     if( f.name.endsWith('.tar.gz') || f.name.endsWith('.tgz') ) {
-    //         ref_dir_ch << f
-    //     } else {
-    //         // assume directory already
-    //         ref_dir_ch << f
-    //     }
-    // }
+    txt_ch.join(fasta_ch) \
+        | extract_fusion_sequences \
+        | set{fusion_fa_ch}
 
-    // // For simplicity, call tar process only if input is a tar.gz
-    // ref_ready = ref_dir_ch
-    //     .map { f -> f }  // forward to jaffa step; process will handle tar vs dir
-    //     .set { ref_ready_ch }
+    psl_ch = minimap2_genome(fusion_fa_ch)
 
-    // Step 2: run JAFFA (bpipe)
-    jaffa_in_ch = ref_ch.combine(Channel.fromPath(params.fastq))
+    txt_ch \
+        | make_fasta_reads_table \
+        | set{reads_ch}
 
+    psl_ch.join(reads_ch) \
+        | get_final_list \
+        | set{summary_ch}
 
-    jaffa_out = process_run_jaffa(jaffa_in_ch).jaffa_csv
+    summary_ch.join(txt_ch) \
+        | report_3_gene_fusions
 
-    // Step 3: convert to bedpe
-    process_convert_bedpe( jaffa_out )
 }
 
 
